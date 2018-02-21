@@ -43,7 +43,7 @@ import Data.Concurrent.Deque.ChaseLev.DequeInstance             ()
 #else
 import Data.Concurrent.Deque.Reference.DequeInstance            ()
 #endif
-
+import Deadlock
 
 -- | The 'Gang' structure tracks the state of all workers in the program. It
 -- starts empty, and workers append to it as they are brought online. Although
@@ -107,11 +107,11 @@ data Req
 --
 {-# NOINLINE uniqueSupply #-}
 uniqueSupply :: MVar Int
-uniqueSupply = unsafePerformIO $ newMVar 0
+uniqueSupply = unsafePerformIO $ retryCount "finaliseWorker.putMVar" $ newMVar 0
 
 -- Generate  a fresh identifier. Note that the bang pattern is important.
 freshId :: IO Int
-freshId = modifyMVar uniqueSupply (\n -> let !n' = n+1 in return (n', n))
+freshId =  retryCount "freshId" $ modifyMVar uniqueSupply (\n -> let !n' = n+1 in return (n', n))
 
 
 -- | Create a set of workers. This is a somewhat expensive function, so it is
@@ -151,7 +151,7 @@ gangWorker :: Int -> Worker -> IO ()
 gangWorker threadId st@Worker{..} = do
 
   -- Wait for a request
-  req   <- takeMVar requestVar
+  req   <- retryCount "gangWorker.takeMVar" $ takeMVar requestVar
 
   case req of
     ReqShutdown ->
@@ -159,7 +159,7 @@ gangWorker threadId st@Worker{..} = do
 
     ReqDo action -> do
         action threadId         -- Run the action we were given
-        putMVar resultVar ()    -- Signal that the action is complete
+        retryCount "gangWorker.putMVar" $ putMVar resultVar ()    -- Signal that the action is complete
         gangWorker threadId st  -- Wait for more requests
 
 
@@ -177,10 +177,10 @@ workerIO workers action = mask $ \restore -> do
   -- Send requests to the threads
   V.forM_ workers $ \Worker{..} -> do
     writeIORef consecutiveFailures 0
-    putMVar requestVar $ ReqDo (reflectExceptionsTo main . restore . action)
+    retryCount "workerIO.puMVar" $ putMVar requestVar $ ReqDo (reflectExceptionsTo main . restore . action)
 
   -- Wait for all requests to complete
-  V.forM_ workers $ \Worker{..} -> takeMVar resultVar
+  V.forM_ workers $ \Worker{..} -> retryCount "gangWorker.takeMVar" $ takeMVar resultVar
 
 reflectExceptionsTo :: ThreadId -> IO () -> IO ()
 reflectExceptionsTo tid action =
@@ -212,8 +212,8 @@ catchNonThreadKilled action handler =
 finaliseWorker :: Worker -> IO ()
 finaliseWorker Worker{..} = do
   message (printf "worker %d shutting down" workerId)
-  putMVar requestVar ReqShutdown
-  takeMVar resultVar
+  retryCount "finaliseWorker.putMVar" $ putMVar requestVar ReqShutdown
+  retryCount "finaliseWorker.takeMVar" $ takeMVar resultVar
 
 
 -- | Check whether the work queues of all workers in a gang are empty
